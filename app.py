@@ -4,6 +4,15 @@ import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 import time
+import io
+import json
+from datetime import datetime
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 
 # Load environment variables
 load_dotenv()
@@ -11,15 +20,120 @@ load_dotenv()
 # Configure Google Generative AI
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
+
+def input_image_setup(uploaded_file):
+    """Validate and prepare the image for analysis"""
+    if uploaded_file is not None:
+        try:
+            if uploaded_file.size > 10 * 1024 * 1024:
+                raise ValueError(
+                    "Please upload a smaller image (less than 10MB)")
+
+            valid_formats = ["image/jpeg", "image/jpg", "image/png"]
+            if uploaded_file.type not in valid_formats:
+                raise ValueError("Please upload a JPG or PNG image")
+
+            bytes_data = uploaded_file.getvalue()
+            return [{"mime_type": uploaded_file.type, "data": bytes_data}]
+        except Exception as e:
+            raise ValueError(f"Invalid image: {str(e)}")
+    raise FileNotFoundError("Please upload an image first")
+
+
+class FoodHistory:
+    def __init__(self):
+        self.history_file = "food_history.json"
+        self.load_history()
+
+    def load_history(self):
+        if os.path.exists(self.history_file):
+            with open(self.history_file, 'r') as f:
+                self.history = json.load(f)
+        else:
+            self.history = []
+
+    def save_history(self):
+        with open(self.history_file, 'w') as f:
+            json.dump(self.history, f)
+
+    def add_entry(self, user_id, image_path, analysis, calories):
+        entry = {
+            'user_id': user_id,
+            'timestamp': datetime.now().isoformat(),
+            'image_path': image_path,
+            'analysis': analysis,
+            'calories': calories
+        }
+        self.history.append(entry)
+        self.save_history()
+
+    def get_user_history(self, user_id):
+        return [entry for entry in self.history if entry['user_id'] == user_id]
+
+
+class PDFGenerator:
+    @staticmethod
+    def create_pdf(analysis_text, image_path=None):
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        styles = getSampleStyleSheet()
+
+        # Custom style for headers
+        styles.add(ParagraphStyle(
+            name='CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            spaceAfter=30,
+            textColor=colors.HexColor('#ff4b4b')
+        ))
+
+        # Content elements
+        elements = []
+
+        # Title
+        elements.append(
+            Paragraph("Health Analysis Report", styles['CustomTitle']))
+        elements.append(Spacer(1, 12))
+
+        # Add image if provided
+        if image_path:
+            img = RLImage(image_path, width=5*inch, height=4*inch)
+            elements.append(img)
+            elements.append(Spacer(1, 12))
+
+        # Format analysis text
+        for line in analysis_text.split('\n'):
+            if line.strip().startswith('#'):
+                # Handle headers
+                elements.append(Paragraph(line.replace(
+                    '#', '').strip(), styles['Heading2']))
+            else:
+                # Handle regular text
+                elements.append(Paragraph(line, styles['Normal']))
+            elements.append(Spacer(1, 6))
+
+        doc.build(elements)
+        return buffer
+
+
 class NutritionAnalyzer:
     def __init__(self):
         self.model = genai.GenerativeModel('gemini-1.5-flash')
         self.chat_model = genai.GenerativeModel('gemini-1.5-pro')
         self.max_retries = 3
         self.retry_delay = 2
+        self.food_history = FoodHistory()
 
-    def analyze_image(self, image_data, custom_prompt=""):
-        """Analyze food image with health insights and exercise recommendations"""
+    def extract_calories(self, analysis_text):
+        try:
+            for line in analysis_text.split('\n'):
+                if 'Total Calories:' in line:
+                    return int(line.split(':')[1].strip().split()[0])
+        except:
+            return 0
+        return 0
+
+    def analyze_image(self, image_data, user_id, image_path, custom_prompt=""):
         prompt = """
         You are an expert nutritionist and fitness coach. Analyze the food in the image and provide:
 
@@ -54,13 +168,21 @@ class NutritionAnalyzer:
         Please format the response in clean markdown with emojis for better readability.
         If you're unsure about any item, provide an estimate and mention it.
         """
-        
+
         full_prompt = prompt + "\n" + custom_prompt if custom_prompt else prompt
-        
+
         for attempt in range(self.max_retries):
             try:
-                response = self.model.generate_content([full_prompt, image_data[0]])
-                return response.text
+                response = self.model.generate_content(
+                    [full_prompt, image_data[0]])
+                analysis = response.text
+                calories = self.extract_calories(analysis)
+
+                # Save to history
+                self.food_history.add_entry(
+                    user_id, image_path, analysis, calories)
+
+                return analysis
             except Exception as e:
                 if attempt == self.max_retries - 1:
                     raise Exception(f"Analysis failed: {str(e)}")
@@ -81,72 +203,72 @@ class NutritionAnalyzer:
         except Exception as e:
             raise Exception(f"Chat response failed: {str(e)}")
 
-def input_image_setup(uploaded_file):
-    """Process the uploaded image file"""
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.size > 10 * 1024 * 1024:
-                raise ValueError("Please upload a smaller image (less than 10MB)")
-            
-            valid_formats = ["image/jpeg", "image/jpg", "image/png"]
-            if uploaded_file.type not in valid_formats:
-                raise ValueError("Please upload a JPG or PNG image")
-            
-            bytes_data = uploaded_file.getvalue()
-            return [{"mime_type": uploaded_file.type, "data": bytes_data}]
-        except Exception as e:
-            raise ValueError(f"Invalid image: {str(e)}")
-    raise FileNotFoundError("Please upload an image first")
 
 def main():
     st.set_page_config(
         page_title="Smart Health Analyzer",
         page_icon="🥗",
         layout="wide",
-        initial_sidebar_state="expanded"
     )
 
-    # Custom CSS for modern UI
+    # Custom CSS with lighter capture section and removed button animation
     st.markdown("""
         <style>
-        /* Modern styling */
+        /* Previous CSS styles */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
         
         * {
             font-family: 'Inter', sans-serif;
         }
         
-        /* Cards */
-        .stCard {
-            border-radius: 15px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            padding: 1.5rem;
-            margin: 1rem 0;
-            background: white;
+        .title {
+            background: linear-gradient(45deg, #ff6b6b, #ff8e8e);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 3rem;
+            font-weight: 600;
+            text-align: center;
+            margin-bottom: 2rem;
         }
         
-        /* Buttons */
+        .capture-section {
+          
+    border-radius: 15px;
+
+        }
+        
         .stButton button {
             border-radius: 8px;
             padding: 0.5rem 1rem;
-            background: linear-gradient(45deg, #ff4b4b, #ff6b6b);
+            background: #ff4b4b !important;
             color: white;
             border: none;
-            transition: all 0.3s ease;
+            transition: none;
         }
         
         .stButton button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(255, 75, 75, 0.2);
+            transform: none;
+            box-shadow: none;
         }
         
-        /* Headers */
-        h1, h2, h3 {
-            color: #333;
-            font-weight: 600;
+        .history-entry {
+            background: white;
+            padding: 1rem;
+            border-radius: 10px;
+            margin: 0.5rem 0;
+            border: 1px solid #eee;
         }
         
-        /* Chat container */
+        .history-date {
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .history-calories {
+            color: #ff4b4b;
+            font-weight: bold;
+        }
+        
         .chat-container {
             border-radius: 15px;
             border: 1px solid #eee;
@@ -156,7 +278,6 @@ def main():
             overflow-y: auto;
         }
         
-        /* Messages */
         .user-message {
             background: #f0f2f5;
             padding: 0.8rem;
@@ -170,52 +291,44 @@ def main():
             border-radius: 15px;
             margin: 0.5rem 0;
         }
-        
-        /* Tabs */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 2rem;
-        }
-        
-        .stTabs [data-baseweb="tab"] {
-            padding: 1rem 2rem;
-        }
         </style>
     """, unsafe_allow_html=True)
 
-    # Sidebar for settings and information
-    with st.sidebar:
-        st.image("https://via.placeholder.com/150.png?text=Health+AI", width=150)
-        st.markdown("### 🎯 How to use")
-        st.markdown("""
-        1. Upload a food image
-        2. Get instant analysis
-        3. Chat with AI about your food
-        4. Learn about nutrition & exercise
-        """)
-        
-        st.markdown("### 🎨 Theme")
-        theme = st.selectbox("Select theme:", ["Light", "Dark"])
-        
-        st.markdown("### 📱 Display")
-        st.checkbox("Compact mode", help="Enable for smaller screens")
+    # Main title
+    st.markdown('<h1 class="title">Smart Health Analyzer</h1>',
+                unsafe_allow_html=True)
+
+    # Initialize session state for user ID
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = str(hash(datetime.now().isoformat()))
+
+    # Initialize chat history
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
 
     # Main content area with tabs
-    st.title("🥗 Smart Health Analyzer")
     tabs = st.tabs(["📸 Analysis", "💬 Chat", "📊 History"])
 
     with tabs[0]:
         col1, col2 = st.columns([1, 1])
-        
+
         with col1:
-            st.markdown("### Upload Your Food Image")
+            st.markdown('<div class="capture-section">',
+                        unsafe_allow_html=True)
+            st.markdown("### 🥗 Capture or Upload Food Image")
+
+            camera_image = st.camera_input("Take a picture", key="camera")
             uploaded_file = st.file_uploader(
-                "Choose an image",
+                "Or upload an image",
                 type=["jpg", "jpeg", "png"],
                 help="Take a clear photo of your food"
             )
-            
-            if uploaded_file:
-                image = Image.open(uploaded_file)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            image_file = camera_image if camera_image is not None else uploaded_file
+
+            if image_file:
+                image = Image.open(image_file)
                 st.image(image, caption="Your Food", use_column_width=True)
 
             custom_prompt = st.text_input(
@@ -224,78 +337,83 @@ def main():
             )
 
             if st.button("Analyze Food", use_container_width=True):
-                if uploaded_file:
+                if image_file:
                     try:
-                        with st.spinner("AI is analyzing your food..."):
-                            image_data = input_image_setup(uploaded_file)
+                        with st.spinner("Analyzing your food..."):
+                            image_data = input_image_setup(image_file)
                             analyzer = NutritionAnalyzer()
-                            analysis = analyzer.analyze_image(image_data, custom_prompt)
-                            
-                            # Store analysis in session state for chat
+
+                            # Save image temporarily
+                            temp_image = f"food_{st.session_state.user_id}_{
+                                int(time.time())}.jpg"
+                            image.save(temp_image)
+
+                            analysis = analyzer.analyze_image(
+                                image_data,
+                                st.session_state.user_id,
+                                temp_image,
+                                custom_prompt
+                            )
+
                             st.session_state['current_analysis'] = analysis
                             st.session_state['image_data'] = image_data
-                            
-                            # Display analysis in the second column
+
                             with col2:
                                 st.markdown("### 📊 Analysis Results")
                                 st.markdown(analysis)
-                                
-                                # Download button
+
+                                # Generate PDF report
+                                pdf_generator = PDFGenerator()
+                                pdf_buffer = pdf_generator.create_pdf(
+                                    analysis, temp_image)
+
                                 st.download_button(
-                                    "📥 Download Report",
-                                    analysis,
-                                    file_name="health_analysis.md",
-                                    mime="text/markdown"
+                                    "📥 Download PDF Report",
+                                    pdf_buffer.getvalue(),
+                                    file_name="health_analysis.pdf",
+                                    mime="application/pdf"
                                 )
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
                 else:
-                    st.warning("Please upload an image first!")
+                    st.warning("Please capture or upload an image first!")
 
     with tabs[1]:
         st.markdown("### 💬 Chat with AI about Your Food")
-        
-        # Initialize chat history
-        if 'chat_history' not in st.session_state:
-            st.session_state.chat_history = []
-        
+
         # Display chat history
         for message in st.session_state.chat_history:
             if message['role'] == 'user':
-                st.markdown(f'<div class="user-message">👤 You: {message["content"]}</div>', 
-                          unsafe_allow_html=True)
+                st.markdown(f'<div class="user-message">👤 You: {message["content"]}</div>',
+                            unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="bot-message">🤖 AI: {message["content"]}</div>', 
-                          unsafe_allow_html=True)
+                st.markdown(f'<div class="bot-message">🤖 AI: {message["content"]}</div>',
+                            unsafe_allow_html=True)
 
         # Chat input
         if 'image_data' in st.session_state:
-            question = st.text_input("Ask about your food:", 
-                                   placeholder="E.g., Is this meal suitable for diabetics?")
-            
+            question = st.text_input("Ask about your food:",
+                                     placeholder="E.g., Is this meal suitable for diabetics?")
+
             if st.button("Send", use_container_width=True):
                 if question:
                     try:
-                        # Add user message to history
                         st.session_state.chat_history.append({
                             'role': 'user',
                             'content': question
                         })
-                        
-                        # Get AI response
+
                         analyzer = NutritionAnalyzer()
                         response = analyzer.chat_about_food(
-                            st.session_state.image_data, 
+                            st.session_state.image_data,
                             question
                         )
-                        
-                        # Add AI response to history
+
                         st.session_state.chat_history.append({
                             'role': 'assistant',
                             'content': response
                         })
-                        
-                        # Rerun to update chat display
+
                         st.experimental_rerun()
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
@@ -303,8 +421,28 @@ def main():
             st.info("Please analyze a food image first to start chatting!")
 
     with tabs[2]:
-        st.markdown("### 📊 Analysis History")
-        st.info("Coming soon: Track your nutrition and exercise history over time!")
+        st.markdown("### 📊 Your Food History")
+
+        analyzer = NutritionAnalyzer()
+        user_history = analyzer.food_history.get_user_history(
+            st.session_state.user_id)
+
+        if user_history:
+            for entry in reversed(user_history):
+                with st.expander(f"Meal from {datetime.fromisoformat(entry['timestamp']).strftime('%Y-%m-%d %H:%M')}"):
+                    col1, col2 = st.columns([1, 2])
+
+                    with col1:
+                        if os.path.exists(entry['image_path']):
+                            st.image(entry['image_path'],
+                                     use_column_width=True)
+
+                    with col2:
+                        st.markdown(f"**Calories:** {entry['calories']}")
+                        st.markdown(entry['analysis'])
+        else:
+            st.info("No food history yet. Start by analyzing your first meal!")
+
 
 if __name__ == "__main__":
     main()
