@@ -225,10 +225,10 @@ def main():
             background: linear-gradient(45deg, #ff6b6b, #ff8e8e);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            font-size: 3rem;
+            font-size: 2rem;
             font-weight: 600;
             text-align: center;
-            margin-bottom: 2rem;
+            margin-top: -3rem;
         }
         
         .capture-section {
@@ -295,7 +295,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # Main title
-    st.markdown('<h1 class="title">Smart Health Analyzer</h1>',
+    st.markdown('<h3 class="title">Smart Health Analyzer</h3>',
                 unsafe_allow_html=True)
 
     # Initialize session state for user ID
