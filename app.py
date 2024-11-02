@@ -414,7 +414,7 @@ def main():
                             'content': response
                         })
 
-                        st.experimental_rerun()
+                        
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
         else:
