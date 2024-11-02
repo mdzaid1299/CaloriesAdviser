@@ -279,14 +279,14 @@ def main():
         }
         
         .user-message {
-            background: #f0f2f5;
+            background: #4976ba;
             padding: 0.8rem;
             border-radius: 15px;
             margin: 0.5rem 0;
         }
         
         .bot-message {
-            background: #fff3f3;
+            background: #8e60a3;
             padding: 0.8rem;
             border-radius: 15px;
             margin: 0.5rem 0;
